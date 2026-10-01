@@ -1,0 +1,14 @@
+# 强制浅色主题，防止系统深色模式导致文字变浅看不清
+[theme]
+base = "light"
+primaryColor = "#FF8C42"
+backgroundColor = "#FFF8E7"
+secondaryBackgroundColor = "#FFF1E6"
+textColor = "#2C2C2C"
+font = "sans serif"
+
+[client]
+toolbarMode = "minimal"
+
+[server]
+headless = true
