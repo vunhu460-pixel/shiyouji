@@ -36,11 +36,27 @@ except Exception:
     pass
 
 
+def _st_secret(key: str) -> str:
+    """读取 Streamlit Cloud Secrets（部署到 streamlit.app 时由平台注入）。
+    本地无 streamlit / 无 secrets 时安全返回空串。"""
+    try:
+        import streamlit as st
+        v = st.secrets.get(key) if hasattr(st, "secrets") else None
+        return str(v).strip() if v else ""
+    except Exception:
+        return ""
+
+
 def _env(*keys: str, default: str = "") -> str:
+    # 优先级：系统环境变量/.env → Streamlit 云端 Secrets → default
     for k in keys:
         v = os.getenv(k, "")
         if v and v.strip():
             return v.strip()
+    for k in keys:
+        v = _st_secret(k)
+        if v:
+            return v
     return default
 
 

@@ -25,10 +25,10 @@ from theme import (
     AGENT_META, trigger_badge_html, agent_chips_html,
     guide_card_html, img_data_url,
 )
-from agent import get_default_agents, reset_agents, CITIES, get_city_guide
+from agent import get_default_agents, CITIES, get_city_guide
 from orchestrator import AIOrchestrator, AGENT_DISPLAY
 from router import route, parse_mention
-from llm import LLMConfig, LLMClient, LLMError, reset_client
+from llm import LLMError
 from memory import TravelContext, ConversationMemory
 
 
@@ -506,8 +506,7 @@ def _handle_user_input(user_text: str, image_bytes: Optional[bytes] = None,
     # 未配置 API Key 时统一拦截（演示按钮等入口也走这里，避免未配置就调用）
     _fa = next(iter(st.session_state.agents.values()), None)
     if not (_fa and _fa.client.config.is_configured):
-        st.error("🚫 请先配置 AI_API_KEY 再开始对话"
-                 "（左侧「⚙️ 设置 & 工具」可临时配置，或在 `.env` 中配置后重启）。")
+        st.error("😿 AI 服务暂时未就绪，请稍后再试；如持续如此请联系网站管理员。")
         return
 
     conv = _current_conv()
@@ -671,46 +670,18 @@ with st.sidebar:
 
     st.divider()
 
-    # —— 底部折叠：设置 / 触发模式 / 演示 / 清空导出 ——
+    # —— 底部折叠：设置 / 触发模式 / 清空导出 ——
     with st.expander("⚙️ 设置 & 工具", expanded=False):
-        st.markdown("**🔑 AI 配置**")
-        st.caption("推荐在 `.env` 文件配置 `AI_API_KEY`。此处为运行时临时配置（仅本会话有效）。")
-        api_key = st.text_input("AI_API_KEY", type="password",
-                                value=st.session_state.get("_api_key", ""))
-        base_url = st.text_input("AI_BASE_URL",
-                                 value=st.session_state.get("_base_url", "https://api.groq.com/openai/v1"))
-        model = st.text_input("AI_MODEL", value=st.session_state.get("_model", "qwen/qwen3.8-27b"))
-
-        if st.button("🔄 应用配置", use_container_width=True):
-            st.session_state["_api_key"] = api_key
-            st.session_state["_base_url"] = base_url
-            st.session_state["_model"] = model
-            cfg = LLMConfig(api_key=api_key.strip(),
-                            base_url=base_url.strip() or "https://api.openai.com/v1",
-                            model=model.strip() or "gpt-4o-mini")
-            # 关键：同一个 client 同步给 全局默认 / Agents / Orchestrator，
-            # 否则 Orchestrator 还拿着旧的空 Key client（之前"已配置仍报未配置"的根因）
-            new_client = reset_client(cfg)
-            st.session_state.agents = reset_agents(new_client)
-            st.session_state.orchestrator = AIOrchestrator(
-                agents=st.session_state.agents, client=new_client)
-            if cfg.is_configured:
-                st.success("🌍 真实 API 配置已应用")
-            else:
-                st.error("请先配置 AI_API_KEY（未填 Key 系统不会工作，也不提供模拟回答）")
-            st.rerun()
-
-        # 从第一个 agent 取 client config
+        # API Key 由服务端统一配置（本地 .env / 云端 Secrets），访客无需也无法修改
         first_agent = next(iter(st.session_state.agents.values()), None)
         cfg = first_agent.client.config if first_agent else None
         if cfg and cfg.is_configured:
-            st.markdown('<span class="sy-badge live">🌍 真实 API</span>',
+            st.markdown('<span class="sy-badge live">🌍 智能导游已就绪</span>',
                         unsafe_allow_html=True)
-            st.caption(f"{cfg.model} @ {cfg.base_url}")
         else:
-            st.markdown('<span class="sy-badge mock">🚫 未配置 API Key</span>',
+            st.markdown('<span class="sy-badge mock">🚫 服务未就绪</span>',
                         unsafe_allow_html=True)
-            st.caption("请配置 AI_API_KEY 后才能开始对话")
+            st.caption("AI 服务配置缺失，请联系管理员在服务端配置 API Key。")
 
         st.markdown("**🔊 语音对话**")
         st.session_state.auto_voice = st.checkbox(
@@ -951,19 +922,7 @@ else:
 first_agent = next(iter(st.session_state.agents.values()), None)
 _cfg_ready = bool(first_agent and first_agent.client.config.is_configured)
 if not _cfg_ready:
-    st.error(
-        "🚫 **请先配置 AI_API_KEY。**\n\n"
-        "本系统只使用真实 AI，没有模拟回答。配置方法：\n"
-        "1. 复制 `.env.example` 为 `.env`，填入 `AI_API_KEY` 后重启；\n"
-        "   或在左侧「⚙️ 设置 & 工具」临时填入后点「应用配置」。\n"
-        "2. **免费且无需身份证的 API（邮箱注册即可）**：\n"
-        "   - Groq：`https://api.groq.com/openai/v1`，模型 `qwen/qwen3.8-27b`，"
-        "去 console.groq.com 注册\n"
-        "   - GitHub Models：`https://models.github.ai/inference`，模型 `gpt-4o-mini`，"
-        "用 GitHub Token 当 Key\n"
-        "   - OpenRouter：`https://openrouter.ai/api/v1`，"
-        "模型 `meta-llama/llama-3.3-70b-instruct:free`"
-    )
+    st.error("😿 **AI 服务暂时未就绪。** 请稍后再试；如持续如此，请联系网站管理员检查服务端配置。")
 
 # 快捷追问按钮触发的输入
 if st.session_state.get("quick_question"):
