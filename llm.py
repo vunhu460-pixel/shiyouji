@@ -60,6 +60,27 @@ def _env(*keys: str, default: str = "") -> str:
     return default
 
 
+def _compress_image(image_bytes: bytes, max_side: int = 1024,
+                    quality: int = 75) -> bytes:
+    """压缩图片：等比缩放到最大边 max_side，转 JPEG。失败时返回原图。"""
+    try:
+        from io import BytesIO
+        from PIL import Image
+        img = Image.open(BytesIO(image_bytes))
+        if img.mode in ("RGBA", "P"):
+            img = img.convert("RGB")
+        w, h = img.size
+        if max(w, h) > max_side:
+            scale = max_side / float(max(w, h))
+            img = img.resize((max(1, int(w * scale)), max(1, int(h * scale))),
+                             Image.LANCZOS)
+        out = BytesIO()
+        img.save(out, format="JPEG", quality=quality, optimize=True)
+        return out.getvalue()
+    except Exception:
+        return image_bytes
+
+
 # =====================================================================
 # 配置
 # =====================================================================
@@ -249,6 +270,8 @@ class LLMClient:
         else:
             client = self._sdk()
             model = self.config.model
+        # 图片压缩：最大边 1024px、JPEG 质量 75，大幅降低 token 消耗（免费额度很小）
+        image_bytes = _compress_image(image_bytes)
         b64 = base64.b64encode(image_bytes).decode("utf-8")
         messages: List[Dict] = []
         if history:
@@ -258,26 +281,38 @@ class LLMClient:
             "content": [
                 {"type": "text", "text": text or "请描述这张图片。"},
                 {"type": "image_url",
-                 "image_url": {"url": f"data:{mime_type};base64,{b64}"}},
+                 "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
             ],
         })
         if system_prompt:
             messages.insert(0, {"role": "system", "content": system_prompt})
-        try:
-            resp = client.chat.completions.create(
-                model=model, messages=messages,
-                temperature=self.config.temperature,
-                max_tokens=self.config.max_tokens,
-            )
-            content = resp.choices[0].message.content or ""
-        except LLMError:
-            raise
-        except Exception as e:
-            err = _classify_error(e)
-            if "model" in err.detail.lower() and ("400" in err.detail or "image" in err.detail.lower()):
-                raise LLMError("当前模型不支持图片识别，请在 .env 换用支持 vision 的模型（如 gpt-4o-mini、glm-4v）。",
-                               err.detail)
-            raise err
+        # 免费渠道限流（429）时等待后自动重试一次
+        import time as _time
+        for attempt in range(2):
+            try:
+                resp = client.chat.completions.create(
+                    model=model, messages=messages,
+                    temperature=self.config.temperature,
+                    max_tokens=self.config.max_tokens,
+                )
+                content = resp.choices[0].message.content or ""
+                break
+            except LLMError:
+                raise
+            except Exception as e:
+                low_s = str(e).lower()
+                is_rate = "429" in str(e) or "rate" in low_s or "quota" in low_s
+                if is_rate and attempt == 0:
+                    _time.sleep(8)
+                    continue
+                err = _classify_error(e)
+                if is_rate:
+                    raise LLMError("图片识别当前用的人太多，请等 1 分钟再发这张图。",
+                                   err.detail)
+                if "model" in err.detail.lower() and ("400" in err.detail or "image" in err.detail.lower()):
+                    raise LLMError("当前模型不支持图片识别，请在 .env 换用支持 vision 的模型（如 gpt-4o-mini、glm-4v）。",
+                                   err.detail)
+                raise err
         if not content.strip():
             raise LLMError("AI 无法识别这张图片，请换一张试试。", "empty vision completion")
         return content
