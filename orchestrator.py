@@ -73,6 +73,8 @@ _COORDINATOR_SYSTEM = """你是《食游记》的金牌总导游（Coordinator�
    - 酒店推荐具体化（如「住五一广场，全季酒店，约400元/晚」）
    - 估算每日费用和总预算
    - 用 Markdown 表格清晰展示（表格内不用 <br>，每行一个要点）
+10. 【图片地点】禁止凭空猜测城市；用户已说明城市时，结合画面特征直接判断地标；
+    用户没说城市且画面无法定位时，只描述画面并请用户告知城市。
 """
 
 _FOLLOWUP_TEMPLATES = {
@@ -113,17 +115,28 @@ class AIOrchestrator:
 
         # ---- 图片理解（真实 vision 调用）----
         image_desc = ""
+        image_place_sure = False
         if image:
             image_desc = self.client.chat_with_image(
                 user_text or "这是我在旅行中拍摄的图片，请描述内容（地点/美食/建筑）。",
                 image,
-                system_prompt="你是旅行图片分析助手。识别图片中的景点/美食/建筑，"
-                              "用中文简述（80字内），供后续专家回答参考。"
-                              "无法确定就说无法确定，不要猜测编造。")
+                system_prompt="你是旅行图片分析助手。只描述图片中肉眼可见的内容："
+                              "物体/建筑外观、颜色、造型、招牌文字、自然环境（80字内）。"
+                              "关于城市和具体地标：除非你能清楚看到地名文字，"
+                              "否则一律不要猜测城市名或地标名，直接写『地点无法从画面确定』。"
+                              "严禁编造城市和地标。")
+            image_place_sure = ("无法" not in image_desc and "不能确定" not in image_desc)
 
         combined_text = user_text
         if image_desc:
-            combined_text = f"{user_text}\n[用户上传了图片，图片内容：{image_desc}]"
+            if image_place_sure:
+                combined_text = f"{user_text}\n[用户上传了图片，图片内容：{image_desc}]"
+            else:
+                combined_text = (f"{user_text}\n[用户上传了图片，画面内容：{image_desc}。"
+                                 "重要：图片的拍摄城市无法仅从画面确定，禁止凭空猜测城市。"
+                                 "若用户已说明城市，请结合该城市与画面特征判断具体地标，"
+                                 "特征吻合度高时直接指出地标（如红色螺旋雕塑+青岛→五四广场五月的风）；"
+                                 "若用户没说城市或仍无法判断，只描述画面外观并请用户告知城市。]")
 
         # ---- 意图路由 ----
         route_result = route(
