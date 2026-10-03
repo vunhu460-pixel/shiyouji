@@ -560,7 +560,16 @@ def _handle_user_input(user_text: str, image_bytes: Optional[bytes] = None,
     conv["round"] += 1
     rnd = conv["round"]
     if conv["title"] in ("新对话", "") and user_text.strip():
-        conv["title"] = user_text.strip()[:18]
+        # 行程类问题用「城市+天数」做标题，更像一份旅行计划
+        from orchestrator import _detect_tour_days
+        _days = _detect_tour_days(user_text)
+        _m = re.search(r"(?:定制|规划|安排|去|到|玩)\s*([一-龥]{2,6}?)\s*(?:的)?\s*(?:\d{1,2}|[一二两三四五六七八九十]{1,3})\s*(?:天|日)", user_text)
+        if _days and _m:
+            conv["title"] = f"{_m.group(1)}{_days}天行程"
+        elif _looks_like_tour_request(user_text) and _m:
+            conv["title"] = f"{_m.group(1)}行程"
+        else:
+            conv["title"] = user_text.strip()[:18]
 
     # 用户气泡：图片和文字放一起（小图在上，文字在下，像 ChatGPT）
     user_display = user_text
@@ -648,6 +657,10 @@ def _handle_user_input(user_text: str, image_bytes: Optional[bytes] = None,
             "role": "assistant", "avatar": "🧳",
             "content": full_answer,
             "guide": result, "round": rnd,
+            "is_tour": bool(result.get("tour_days"))
+                      or _looks_like_tour_request(user_text),
+            "tour_days": int(result.get("tour_days") or 0),
+            "time": __import__("datetime").datetime.now().strftime("%m-%d %H:%M"),
         })
 
     except LLMError as e:
@@ -783,6 +796,31 @@ with st.sidebar:
 # 五、主对话区
 # =====================================================================
 
+def _looks_like_tour_request(text: str) -> bool:
+    """从用户提问判断是否在索要行程计划（单天计划也覆盖）。
+    必须含行程类词语，避免『这3天天气』之类误判。"""
+    t = text or ""
+    return bool(re.search(
+        r"行程|旅行计划|旅游计划|tour|攻略|日程|几日游|日游|规划|"
+        r"安排.{0,6}(玩|路线|出游|出行)", t))
+
+
+def _is_tour_message(msg: Dict) -> bool:
+    """判断一条助手消息是否为行程计划。
+
+    优先用生成时打的 is_tour 标记；旧会话/旧标记缺失时，
+    再用正文特征兜底（同时出现第1天和第2天，避免误判单天问答）。"""
+    if msg.get("is_tour"):
+        return True
+    guide = msg.get("guide")
+    if isinstance(guide, dict) and guide.get("tour_days"):
+        return True
+    c = msg.get("content", "") or ""
+    has_d1 = bool(re.search(r"第\s*[1一]\s*天|day\s*1\b", c, re.IGNORECASE))
+    has_d2 = bool(re.search(r"第\s*[2二]\s*天|day\s*2\b", c, re.IGNORECASE))
+    return has_d1 and has_d2
+
+
 def _render_itinerary_planner() -> None:
     """📋 行程规划页：表单填写 → AI 生成详细 Tour 计划。"""
     st.markdown("## 📋 AI 行程规划")
@@ -808,7 +846,8 @@ def _render_itinerary_planner() -> None:
 
     # 显示当前会话中最新的行程计划
     conv = _current_conv()
-    tours = [m for m in conv.get("messages", []) if m.get("role") == "assistant" and "行程" in m.get("content", "")[:50]]
+    tours = [m for m in conv.get("messages", [])
+             if m.get("role") == "assistant" and _is_tour_message(m)]
     if tours:
         st.markdown("---")
         st.markdown("### 📋 最近的行程计划")
@@ -825,15 +864,15 @@ def _render_my_trips() -> None:
     all_tours = []
     for conv in st.session_state.conversations:
         for msg in conv.get("messages", []):
-            if msg.get("role") == "assistant":
+            if msg.get("role") == "assistant" and _is_tour_message(msg):
                 content = msg.get("content", "")
-                if any(kw in content[:80] for kw in ["行程", "Day", "第一天", "时间表", "预算"]):
-                    all_tours.append({
-                        "conv_title": conv.get("title", "未命名"),
-                        "conv_id": conv.get("id"),
-                        "content": content,
-                        "time": msg.get("time", ""),
-                    })
+                all_tours.append({
+                    "conv_title": conv.get("title", "未命名"),
+                    "conv_id": conv.get("id"),
+                    "content": content,
+                    "time": msg.get("time", ""),
+                    "tour_days": msg.get("tour_days") or 0,
+                })
 
     if not all_tours:
         st.info("还没有生成过行程计划。去「📋 行程规划」页填写信息，AI 会帮你定制。")
@@ -843,7 +882,10 @@ def _render_my_trips() -> None:
         return
 
     for i, tour in enumerate(reversed(all_tours[-10:])):
-        with st.expander(f"📋 {tour['conv_title']} — 行程计划", expanded=(i == 0)):
+        _label = tour["conv_title"]
+        if tour.get("tour_days"):
+            _label = f"{_label}（{tour['tour_days']}天）"
+        with st.expander(f"📋 {_label} — 行程计划", expanded=(i == 0)):
             answer = _strip_br(tour["content"])
             st.markdown(answer)
             col1, col2 = st.columns([1, 1])
