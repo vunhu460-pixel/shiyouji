@@ -800,7 +800,7 @@ def _render_itinerary_planner() -> None:
         submitted = st.form_submit_button("🚀 生成行程", type="primary", use_container_width=True)
 
     if submitted and destination:
-        st.session_state["quick_question"] = f"请为我定制{destination}{duration}的详细行程，预算{budget or '不限'}，兴趣{','.join(interests)}，{special or '无特殊需求'}。要求输出完整 Tour 计划：每天具体时间表、交通方式、酒店推荐、费用估算。"
+        st.session_state["quick_question"] = f"请为我定制{destination}{duration}的详细行程，预算{budget or '不限'}，兴趣{','.join(interests)}，{special or '无特殊需求'}。要求完整输出 Tour 计划：必须从第1天逐天写到最后一天，一天都不能少；每天含具体时间表、交通方式、餐饮安排、酒店推荐，最后给出总费用估算。"
         st.session_state.page = "💬 AI导游问答"
         st.rerun()
     elif submitted:

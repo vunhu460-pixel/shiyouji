@@ -26,6 +26,7 @@
 """
 from __future__ import annotations
 
+import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, List, Optional
 
@@ -75,6 +76,9 @@ _COORDINATOR_SYSTEM = """你是《食游记》的金牌总导游（Coordinator�
    - 用 Markdown 表格清晰展示（表格内不用 <br>，每行一个要点）
 10. 【图片地点】系统已通过地标库核对的，直接围绕该城市地标作答，开头自然点出城市与地标名；
     未核对出的，禁止凭空猜测城市，只描述画面并请用户告知城市。
+11. 【多日行程必须完整】多日行程必须逐天输出「第1天」一直到「第N天」，
+    一天都不能少、不能合并、严禁「后面几天以此类推/同理」之类省略。
+    为保证完整，每条安排用短句直给，不写客套和重复铺垫；最后给出总预算。
 """
 
 _FOLLOWUP_TEMPLATES = {
@@ -158,6 +162,45 @@ def _recognize_landmark(client, image: bytes, user_text: str):
 
 _COMMON_FOLLOWUPS = ["🎒 帮我做个预算规划", "📷 有什么拍照打卡点？"]
 
+# 多日行程识别：从「3天」「三日游」「七天+」提取天数（支持阿拉伯/中文数字）
+_CN_NUM = {"一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5,
+           "六": 6, "七": 7, "八": 8, "九": 9, "十": 10}
+_TOUR_DAYS_RE = re.compile(r"(\d{1,2}|[一二两三四五六七八九十]{1,3})\s*(?:天|日)")
+_TOUR_WEEK_RE = re.compile(r"一周|一个星期|一個星期|一个禮拜|一個禮拜")
+_TOUR_KW_RE = re.compile(
+    r"行程|旅行计划|旅游计划|tour|攻略|怎么安排|怎么玩|几日游|日游|日程|规划")
+
+
+def _cn_to_int(s: str) -> int:
+    """把「3」「三」「十二」「十四」等转成数字；非数字返回 0。"""
+    if s.isdigit():
+        return int(s)
+    if s in _CN_NUM:
+        return _CN_NUM[s]
+    if "十" in s:
+        left, _, right = s.partition("十")
+        tens = _CN_NUM.get(left, 1) if left else 1
+        ones = _CN_NUM.get(right, 0) if right else 0
+        return tens * 10 + ones
+    return 0
+
+
+def _detect_tour_days(text: str) -> int:
+    """识别多日行程请求并返回天数（2~14），非行程请求返回 0。"""
+    t = text or ""
+    m = _TOUR_DAYS_RE.search(t)
+    if m:
+        days = _cn_to_int(m.group(1))
+    elif _TOUR_WEEK_RE.search(t):
+        days = 7
+    else:
+        days = 0
+    if days <= 1:
+        return 0
+    if not _TOUR_KW_RE.search(t):
+        return 0
+    return min(14, days)
+
 
 class AIOrchestrator:
     """统一协调器。"""
@@ -240,9 +283,16 @@ class AIOrchestrator:
                 "coordinator_messages": [],
             }
 
+        # ---- 多日行程识别（决定输出长度配额 + 完整性要求）----
+        tour_days = _detect_tour_days(combined_text)
+
         # ---- 并行调用 Agent（失败隔离）----
         agent_keys = route_result.get("agent_keys", [])
-        agent_replies = self._call_agents_parallel(agent_keys, combined_text, history)
+        # 行程请求时专家只提供精炼素材（配额留给总导游写完整逐日计划）
+        agent_max_tokens = 800 if tour_days else None
+        agent_replies = self._call_agents_parallel(
+            agent_keys, combined_text, history,
+            max_tokens=agent_max_tokens)
 
         # ---- 合并去重卡片 ----
         all_cards = []
@@ -269,6 +319,14 @@ class AIOrchestrator:
              "content": f"用户问题：{user_text}\n\n专家回答：\n{results_text}\n\n"
                         f"请整合为最终回答。"},
         ]
+        if tour_days:
+            coord_messages.append({
+                "role": "system",
+                "content": f"【硬性完整性要求】本次必须输出完整的 {tour_days} 天行程："
+                           f"从「第1天」逐天写到「第{tour_days}天」，一天都不能少、不能合并，"
+                           "严禁用「以此类推/后面同理」省略任何一天。"
+                           "每天都要有时间段安排、交通与餐饮；最后用表格给出总预算。",
+            })
 
         city = self._extract_city(user_text) or (self.travel_context.destination or "目的地")
         return {
@@ -284,6 +342,7 @@ class AIOrchestrator:
                       "intent": route_result.get("intent", ""),
                       "extracted": extracted, "tools_used": tools_used},
             "coordinator_messages": coord_messages,
+            "tour_days": tour_days,
         }
 
     # =================================================================
@@ -295,7 +354,11 @@ class AIOrchestrator:
         if not msgs:
             yield "你好！我是游伴星球的金牌导游 🧳 想去哪里玩，问我就好～"
             return
-        gen = self.client.chat(msgs, stream=True, temperature=temperature)
+        # 多日行程按天数扩容输出，避免计划写到一半被截断
+        days = int(prepared.get("tour_days") or 0)
+        max_tokens = min(7000, 1700 + days * 1100) if days else None
+        gen = self.client.chat(msgs, stream=True, temperature=temperature,
+                               max_tokens=max_tokens)
         for chunk in gen:
             if chunk:
                 yield chunk
@@ -322,7 +385,8 @@ class AIOrchestrator:
     # 内部：并行调用 Agent
     # =================================================================
     def _call_agents_parallel(self, agent_keys: List[str], user_text: str,
-                              history: List[Dict]) -> List[Dict]:
+                              history: List[Dict],
+                              max_tokens: Optional[int] = None) -> List[Dict]:
         context = {"travel_summary": self.travel_context.to_summary()}
         results: Dict[str, Dict] = {}
 
@@ -334,7 +398,8 @@ class AIOrchestrator:
                         "cards": [], "result": "",
                         "error": f"未知 Agent：{key}"}
             try:
-                return agent.respond(user_text, context=context, history=history)
+                return agent.respond(user_text, context=context, history=history,
+                                     max_tokens=max_tokens)
             except LLMError as e:
                 return {"agent": key, "agent_name": AGENT_DISPLAY.get(key, key),
                         "avatar": "⚠️", "input": user_text, "tools_used": [],

@@ -160,7 +160,8 @@ class BaseAgent:
     # ---------- 对外入口 ----------
     def respond(self, user_text: str, image: Optional[bytes] = None,
                 context: Optional[Dict] = None,
-                history: Optional[List[Dict]] = None) -> Dict:
+                history: Optional[List[Dict]] = None,
+                max_tokens: Optional[int] = None) -> Dict:
         """真实调用 LLM 生成动态回答。失败抛出 LLMError 由上层统一处理。"""
         tool_context, tools_used = self._gather_tool_context(user_text)
         messages = self._build_messages(user_text, history or [], tool_context, context)
@@ -168,11 +169,12 @@ class BaseAgent:
         data = None
         raw = ""
         try:
-            raw = self.client.chat(messages, stream=False)
+            raw = self.client.chat(messages, stream=False, max_tokens=max_tokens)
         except LLMError as e:
             # 某些兼容 API 不支持 response_format，先试普通模式再解析
             if "response_format" in e.detail or "400" in e.detail:
-                raw = self.client.chat(messages, stream=False)
+                raw = self.client.chat(messages, stream=False,
+                                       max_tokens=max_tokens)
                 data = self._parse_llm_json(raw)
             else:
                 raise
