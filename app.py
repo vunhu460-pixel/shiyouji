@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import io
+import re
 import json
 import base64
 from typing import Dict, List, Optional
@@ -231,6 +232,51 @@ _init_state()
 # =====================================================================
 # 三、渲染辅助函数（前置定义，避免 NameError）
 # =====================================================================
+_BR_RE = re.compile(r"<br\s*/?>", re.IGNORECASE)
+_HALF_BR_RE = re.compile(r"^<(?:b(?:r(?:\s{0,3}/?>?)?)?)?$", re.IGNORECASE)
+
+
+def _strip_br(text: str) -> str:
+    """把 AI 可能生成的各种 <br> 标签统一换成真正的换行（含 <br/>、<BR> 等）。"""
+    if not text:
+        return text or ""
+    return _BR_RE.sub("\n", text)
+
+
+def _br_safe_stream(chunks):
+    """流式回答清洗：边生成边把 <br> 换成换行。
+
+    <br> 可能被切分到两个 token 里（如 '<b' + 'r>'），
+    故把疑似半截标签的末尾留在缓冲区等下一块。"""
+    buf = ""
+    for ch in chunks:
+        if not ch:
+            continue
+        buf += ch
+        out: List[str] = []
+        while True:
+            m = _BR_RE.search(buf)
+            if m:
+                out.append(buf[:m.start()])
+                out.append("\n")
+                buf = buf[m.end():]
+                continue
+            lt = buf.rfind("<")
+            tail_len = len(buf) - lt
+            if lt != -1 and tail_len <= 10 and _HALF_BR_RE.match(buf[lt:]):
+                out.append(buf[:lt])
+                buf = buf[lt:]
+            else:
+                out.append(buf)
+                buf = ""
+            break
+        piece = "".join(out)
+        if piece:
+            yield piece
+    if buf:
+        yield _strip_br(buf)
+
+
 def _render_tts_button(text: str, key_suffix: str,
                         auto_play: bool = False) -> None:
     """🔊 语音输出：浏览器原生 Web Speech API SpeechSynthesis 朗读。
@@ -356,10 +402,11 @@ def _render_guide_result(result: Dict, round_num: int,
 
         if answer_stream is not None:
             with st.spinner("🤖 专家们正在思考并整合回答…"):
-                full_answer = st.write_stream(answer_stream) or ""
+                full_answer = st.write_stream(
+                    _br_safe_stream(answer_stream)) or ""
         elif full_answer:
             # 清理 AI 可能生成的 <br> 标签，转换为换行
-            full_answer = full_answer.replace("<br>", "\n").replace("<br/>", "\n").replace("<br />", "\n")
+            full_answer = _strip_br(full_answer)
             st.markdown(full_answer)
 
         # 专家生成的动态卡片（带配图/故事/贴士）
@@ -410,7 +457,7 @@ def _render_guide_result(result: Dict, round_num: int,
                 else:
                     r = reply.get("result", "")
                     if r:
-                        st.markdown(r[:500] + ("…" if len(r) > 500 else ""))
+                        st.markdown(_strip_br(r[:500]) + ("…" if len(r) > 500 else ""))
                 tools = reply.get("tools_used", [])
                 if tools:
                     st.caption(f"🛠️ 调用真实工具：{', '.join(tools)}")
@@ -766,7 +813,7 @@ def _render_itinerary_planner() -> None:
         st.markdown("---")
         st.markdown("### 📋 最近的行程计划")
         latest = tours[-1]
-        answer = latest.get("content", "").replace("<br>", "\n").replace("<br/>", "\n").replace("<br />", "\n")
+        answer = _strip_br(latest.get("content", ""))
         st.markdown(answer)
 
 
@@ -797,7 +844,7 @@ def _render_my_trips() -> None:
 
     for i, tour in enumerate(reversed(all_tours[-10:])):
         with st.expander(f"📋 {tour['conv_title']} — 行程计划", expanded=(i == 0)):
-            answer = tour["content"].replace("<br>", "\n").replace("<br/>", "\n").replace("<br />", "\n")
+            answer = _strip_br(tour["content"])
             st.markdown(answer)
             col1, col2 = st.columns([1, 1])
             with col1:
@@ -861,7 +908,7 @@ for msg in _conv["messages"]:
             st.markdown(agent_chips_html(agent_names), unsafe_allow_html=True)
             _hist_answer = result.get("answer", "")
             # 清理 AI 可能生成的 <br> 标签
-            _hist_answer = _hist_answer.replace("<br>", "\n").replace("<br/>", "\n").replace("<br />", "\n")
+            _hist_answer = _strip_br(_hist_answer)
             st.markdown(_hist_answer)
             # AI 生成的动态卡片
             _hist_show_img = _user_wants_images(result, result.get("_user_text", ""))
